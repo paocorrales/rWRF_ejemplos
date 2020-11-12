@@ -1,0 +1,108 @@
+---
+title: "Ejemplo de lectura y graficado de salidas de WRF"
+output: github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(metR)
+library(dplyr)
+library(ggplot2)
+source("postprocesamiento.R") # Funciones para calcular algunas variables no incluidas
+
+```
+
+## Lectura
+
+Uso un archivo de ejemplo, el nombre engaña pero es un wrfout tal cual devuelve la simulación.
+
+```{r}
+ncfile <- "/home/paola.corrales/datosmunin/EXP/E6/ANA/20181120180000/analysis.ensmean"
+```
+
+
+Lo primero que hay que hacer es revisar los metadatos pero identificar las dimensiones y los nombres de las variables que interesan. Si las variables en el archivo tienen dimensiones distintas (y es lo que ocurre en este caso ya que hay variables 2D y 3D) no vamos a poder leer el archivo completo. Además cuando los archivos son muy grandes tampoco conviene hacerlo por limitaciones de memoria.
+
+```{r}
+GlanceNetCDF(ncfile) 
+```
+
+La lectura se realiza con la función `ReadNetCDF()` del paquete {metR}, que tiene un argumento `vars` para indicar que variables quiero leer. En este caso también les estoy cambiando el nombre para que sea más simple escribirlas luego. Adicionalmente se podría leer solo una parte del dominio, algún nivel específico o un tiempo en particular con el argumento `subset`.
+
+```{r}
+
+salida <- ReadNetCDF(ncfile, vars = c(p = "P", "PB", t = "T", qv = "QVAPOR", 
+                                    lon = "XLONG", lat = "XLAT")) 
+```
+
+Los wrfout guardan determinadas variables necesarias para la simuación pero no siempre son las que necesitamos para analizar, por eso puede llegar a ser útil "postprocesar" algunas variables y para eso hay algunas funciones disponibles en el archivo postprocesamiento.R
+
+```{r}
+salida <- salida %>% 
+  mutate(p = p + PB,                 # Presión
+         t = tk(t, p),               # Temperatura (K)
+         rh = rh(qv, p, t),          # Humedad relativa
+         td = td(qv, p) + 273.15,    # Temperatura de rocío
+         PB = NULL,                  # Ya no necesito PB
+         u = uvmet(ncfile)[[1]],     # viento zonal rotado
+         v = uvmet(ncfile)[[2]])     # viento meridional rotado
+```
+
+## Graficado
+
+Vamos a necesitar un mapa, hay muchas maneras de obtenerlo, en este caso usamos el paquete {rnaturalearth}
+
+```{r}
+mapa <- rnaturalearth::ne_countries(country = c("argentina", "chile", "uruguay", 
+                                                "paraguay", "brazil", "bolivia", 
+                                                "falkland islands"), 
+                                    returnclass = "sf")
+```
+
+
+Idealmente si vamos a graficar un campo de una variable queremos contornos, el problema es que las geometrias de contornos no se llevan muy bien con grillas irregulares. La reticula del modelo es irregular en el espacio de las coordenadas cartesianas porque están proyectadas (seguramnete usando Lambert). 
+
+Una solución rápida es usar puntos, pero el resultado no es ideal.
+
+```{r}
+salida %>% 
+  filter(bottom_top == 1) %>%   # Primer nivel del modelo
+  ggplot(aes(lon, lat)) +
+  geom_point(aes(color = t), size = 0.5) +
+  scale_color_distiller(palette = "YlOrRd", direction = 1) +
+  geom_sf(data = mapa, inherit.aes = FALSE, fill = NA, color = "black", size = 0.2) +
+  coord_sf(xlim = c(-75, -51), ylim = c(-42, -19)) +
+  theme_minimal()
+```
+
+Si se quieren usar contornos primero es necesario reproyectar la reticula del modelo a coordenadas geográficas. Para esto se usa un paquete {proj4} y por suerte en postprocesamiento.R hay una función que hace casi todo. Para esto necesitamos la información de la proyección usada (todo está en los namelists y además en los metadatos del wrfout!). Para este ejemplo la proyección es:
+
+```{r}
+map_proj <- "+proj=lcc +lat_1=-30.9659996032715 +lat_2=-30.9659996032715 +lat_0=-30.9660034179688 +lon_0=-63.5670013427734 +a=6370000 +b=6370000"
+
+```
+
+Con esa información puedo reproyectar los datos y generar dos nuevas colunas x e y.
+
+```{r}
+salida <- salida %>% 
+  mutate(x = wrf_project(lon, lat, map_proj)[[1]],
+         y = wrf_project(lon, lat, map_proj)[[2]])
+```
+
+Ahora si, se puede usar `geom_cotour_fill()` de {metR} para graficar los contornos.
+
+```{r}
+salida %>% 
+  filter(bottom_top == 1) %>%   # Primer nivel del modelo
+  ggplot(aes(x, y)) +
+  geom_contour_fill(aes(z = t), proj = map_proj) +
+  scale_fill_distiller(palette = "YlOrRd", direction = 1) +
+  geom_sf(data = mapa, inherit.aes = FALSE, fill = NA, color = "black", size = 0.2) +
+  coord_sf(xlim = c(-75, -51), ylim = c(-42, -19)) +
+  theme_minimal()
+```
+
+
+
